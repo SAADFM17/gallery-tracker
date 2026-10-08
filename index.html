@@ -70,6 +70,14 @@
   .log .t{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
   .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 18px;border-radius:999px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;white-space:nowrap}
   .toast.show{opacity:1}
+  .gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:24px 16px;z-index:10}
+  .gate-box{width:100%;max-width:340px;display:flex;flex-direction:column;gap:12px;text-align:center}
+  .gate-box h2{font-family:var(--serif);font-weight:500;font-size:30px;margin:4px 0 0}
+  .gate-box p{margin:0;color:var(--muted);font-size:14px}
+  .gate-box input{font-family:var(--sans);font-size:22px;letter-spacing:.3em;text-align:center;padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--surface);color:var(--ink);width:100%}
+  .gate-box button{font-family:var(--sans);font-size:16px;font-weight:500;border:0;border-radius:14px;padding:14px;background:var(--ink);color:var(--bg);cursor:pointer}
+  .gate-box .err{color:#b4544e;font-size:14px;min-height:20px}
+  .navlink{margin-left:auto;font-size:13px;color:var(--ink);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:3px 11px;background:var(--surface)}
   [hidden]{display:none!important}
   button:focus-visible{outline:2px solid var(--slate);outline-offset:2px}
   @media (prefers-reduced-motion: reduce){.tap,.toast{transition:none}}
@@ -80,7 +88,7 @@
 
 <div class="eyebrow">Mr Doodle at Centurion Haus</div>
 <h1>Gallery <em>Tracker</em></h1>
-<div class="meta"><span class="chip" id="shift"></span><span class="date" id="today"></span><span class="chip" id="net">Loading</span></div>
+<div class="meta"><span class="chip" id="shift"></span><span class="date" id="today"></span><span class="chip" id="net">Loading</span><a class="navlink" href="dashboard.html">Dashboard</a></div>
 
 <div class="summary">
   <div class="card">
@@ -120,6 +128,17 @@
 <div class="log" id="log"></div>
 <div class="toast" id="toast"></div>
 
+<div class="gate" id="gate" hidden>
+  <form class="gate-box" id="gate-form" autocomplete="off">
+    <div class="eyebrow">Mr Doodle at Centurion Haus</div>
+    <h2>Gallery <em>Tracker</em></h2>
+    <p>Enter the team PIN to start counting.</p>
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off" aria-label="Team PIN">
+    <button type="submit" id="unlock">Unlock</button>
+    <div class="err" id="gate-err"></div>
+  </form>
+</div>
+
 <script>
 /* ---------- Setup: paste your Supabase details here ---------- */
 const SUPABASE_URL = "https://xntqjhdbkqlqkzjskvsz.supabase.co";      // e.g. https://abcdxyz.supabase.co
@@ -142,6 +161,9 @@ const DEVICE = lsGet("gallery-device",null) || (()=>{const d=uuid();lsSet("galle
 const configured = !SUPABASE_URL.startsWith("PASTE") && !SUPABASE_ANON_KEY.startsWith("PASTE");
 const db = (configured && window.supabase) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
+let PIN = lsGet("gallery-pin", null);
+const isBadPin = e => e && /bad pin/i.test(e.message||"");
+
 const store = {
   rows: db ? [] : lsGet("gallery-local", []),   // this month's taps
   queue: lsGet("gallery-queue", []),            // shared mode: taps not yet sent
@@ -155,7 +177,7 @@ const store = {
     if(!db) return;
     let out=[], from=0;
     while(true){
-      const {data,error} = await db.from("taps").select("id,ts,kind,source,shift").gte("ts", this.monthStart().toISOString()).order("ts").range(from, from+999);
+      const {data,error} = await db.rpc("get_taps", {p_pin:PIN, p_since:this.monthStart().toISOString()}).range(from, from+999);
       if(error) throw error;
       out = out.concat(data); if(data.length<1000) break; from+=1000;
     }
@@ -169,18 +191,18 @@ const store = {
     this.flush();
   },
   async flush(){
-    if(!db || !this.queue.length || this.flushing) return;
+    if(!db || !PIN || !this.queue.length || this.flushing) return;
     this.flushing = true;
     try{
       const batch = this.queue.slice();
       const payload = batch.map(t=>({id:t.id, ts:new Date(t.ts).toISOString(), kind:t.kind, source:t.source, shift:t.shift, device:DEVICE}));
-      const {error} = await db.from("taps").upsert(payload, {onConflict:"id", ignoreDuplicates:true});
+      const {error} = await db.rpc("add_taps", {p_pin:PIN, p_rows:payload});
       if(error) throw error;
       const sent = new Set(batch.map(t=>t.id));
       batch.forEach(t=>{ if(!this.rows.some(r=>r.id===t.id)) this.rows.push(t); });
       this.queue = this.queue.filter(t=>!sent.has(t.id)); lsSet("gallery-queue", this.queue);
       setNet(true);
-    }catch(e){ setNet(false); }
+    }catch(e){ if(isBadPin(e)) lock(); else setNet(false); }
     finally{ this.flushing=false; render(); }
   },
   async undoLast(){
@@ -193,7 +215,7 @@ const store = {
     this.queue = this.queue.filter(t=>t.id!==id); lsSet("gallery-queue", this.queue);
     this.rows = this.rows.filter(t=>t.id!==id);
     if(!db){ lsSet("gallery-local", this.rows); }
-    else if(!queued){ const {error}=await db.from("taps").delete().eq("id", id); if(error) setNet(false); }
+    else if(!queued){ const {error}=await db.rpc("undo_tap", {p_pin:PIN, p_id:id}); if(error){ if(isBadPin(error)) lock(); else setNet(false); } }
     return tap;
   }
 };
@@ -250,20 +272,37 @@ $("undo").addEventListener("click",async()=>{
 render();
 
 async function refresh(){
-  try{ await store.load(); setNet(true); }catch(e){ setNet(false); }
+  if(!PIN) return lock();
+  try{ await store.load(); setNet(true); }
+  catch(e){ if(isBadPin(e)) return lock(); setNet(false); }
   render(); store.flush();
 }
+function lock(msg){
+  PIN = null; lsSet("gallery-pin", null);
+  $("gate").hidden = false; $("gate-err").textContent = msg || "";
+  setTimeout(()=>$("pin").focus(), 50);
+}
+$("gate-form").addEventListener("submit", async e=>{
+  e.preventDefault();
+  const p = $("pin").value.trim(); if(!p) return;
+  $("unlock").disabled = true; $("unlock").textContent = "Checking...";
+  try{
+    const {data,error} = await db.rpc("check_pin", {p_pin:p});
+    if(error) throw error;
+    if(data===true){ PIN=p; lsSet("gallery-pin", p); $("gate").hidden=true; $("pin").value=""; $("gate-err").textContent=""; refresh(); }
+    else { $("gate-err").textContent = "That PIN is not right. Try again."; $("pin").select(); }
+  }catch(err){ $("gate-err").textContent = "Could not check the PIN. Check the internet and try again."; }
+  finally{ $("unlock").disabled=false; $("unlock").textContent="Unlock"; }
+});
+
 if(!db){
   setNet(false, "This phone only");
   setInterval(render, 60000);
 }else{
-  refresh();
-  db.channel("taps-live")
-    .on("postgres_changes", {event:"*", schema:"public", table:"taps"}, ()=>refresh())
-    .subscribe();
-  setInterval(refresh, 30000);
+  if(PIN) refresh(); else lock();
+  setInterval(()=>{ if(PIN && !document.hidden) refresh(); }, 15000);
   window.addEventListener("online", ()=>store.flush());
-  document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) refresh(); });
+  document.addEventListener("visibilitychange", ()=>{ if(!document.hidden && PIN) refresh(); });
 }
 </script>
 </body>
