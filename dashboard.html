@@ -77,6 +77,17 @@
   .gate-box input{font-family:var(--sans);font-size:22px;letter-spacing:.3em;text-align:center;padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--surface);color:var(--ink);width:100%}
   .gate-box button{font-family:var(--sans);font-size:16px;font-weight:500;border:0;border-radius:14px;padding:14px;background:var(--ink);color:var(--bg);cursor:pointer}
   .gate-box .err{color:var(--bad);font-size:14px;min-height:20px}
+  .pinwrap{position:relative;height:64px;cursor:text}
+  .pindots{display:flex;justify-content:center;align-items:center;gap:16px;height:100%;border:1px solid var(--line);border-radius:14px;background:var(--surface);transition:border-color .15s}
+  .pinwrap:focus-within .pindots{border-color:var(--ink)}
+  .pindots span{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--muted);transition:background .12s,border-color .12s,transform .12s}
+  .pindots span.on{background:var(--ink);border-color:var(--ink);transform:scale(1.08)}
+  .pinwrap.checking span.on{opacity:.45}
+  .pinwrap.ok span{background:#6f9a7f;border-color:#6f9a7f}
+  .pinwrap.bad span{background:#b4544e;border-color:#b4544e}
+  .pinwrap.bad .pindots{animation:pinshake .4s}
+  .gate-box .pinwrap input{position:absolute;inset:0;width:100%;height:100%;opacity:0;font-size:16px;padding:0;border:0}
+  @keyframes pinshake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
   [hidden]{display:none!important}
   button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--slate);outline-offset:2px}
 
@@ -160,8 +171,10 @@
     <div class="eyebrow">Mr Doodle at Centurion Haus</div>
     <h2>Gallery <em>Dashboard</em></h2>
     <p>Enter the team PIN to see the numbers.</p>
-    <input id="pin" type="password" inputmode="numeric" autocomplete="off" aria-label="Team PIN">
-    <button type="submit" id="unlock">Unlock</button>
+    <div class="pinwrap" id="pinwrap">
+      <div class="pindots" id="pindots" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" aria-label="Team PIN, 6 digits">
+    </div>
     <div class="err" id="gate-err"></div>
   </form>
 </div>
@@ -343,25 +356,50 @@ function exportExcel(){
 function lock(msg){
   PIN=null; lsSet("gallery-pin", null);
   $("gate").hidden=false; $("gate-err").textContent=msg||"";
-  setTimeout(()=>$("pin").focus(), 50);
+  $("pin").value=""; paintDots(); setTimeout(()=>$("pin").focus(), 50);
 }
 async function refresh(){
   if(!PIN) return lock();
   try{ await load(); render(); }
   catch(e){ if(isBadPin(e)) return lock(); $("status").textContent = "Could not load the numbers. Check the internet connection."; }
 }
-$("gate-form").addEventListener("submit", async e=>{
-  e.preventDefault();
-  const p=$("pin").value.trim(); if(!p) return;
-  $("unlock").disabled=true; $("unlock").textContent="Checking...";
-  try{
-    const {data,error}=await db.rpc("check_pin",{p_pin:p});
-    if(error) throw error;
-    if(data===true){ PIN=p; lsSet("gallery-pin",p); $("gate").hidden=true; $("pin").value=""; refresh(); }
-    else { $("gate-err").textContent="That PIN is not right. Try again."; $("pin").select(); }
-  }catch(err){ $("gate-err").textContent="Could not check the PIN. Check the internet and try again."; }
-  finally{ $("unlock").disabled=false; $("unlock").textContent="Unlock"; }
+const pinIn = $("pin"), pinWrap = $("pinwrap"), pinDots = [...document.querySelectorAll("#pindots span")];
+let pinChecking = false;
+const pinSleep = ms => new Promise(r=>setTimeout(r, ms));
+function paintDots(){ const n = pinIn.value.length; pinDots.forEach((d,i)=>d.classList.toggle("on", i<n)); }
+pinWrap.addEventListener("click", ()=>pinIn.focus());
+pinIn.addEventListener("input", ()=>{
+  if(pinChecking){ return; }
+  pinIn.value = pinIn.value.replace(/\D/g,"").slice(0,6);
+  pinWrap.classList.remove("bad"); $("gate-err").textContent = "";
+  paintDots();
+  if(pinIn.value.length === 6) tryPin();
 });
+$("gate-form").addEventListener("submit", e=>{ e.preventDefault(); if(pinIn.value.length===6) tryPin(); });
+async function tryPin(){
+  if(pinChecking) return;
+  pinChecking = true; pinWrap.classList.add("checking");
+  const p = pinIn.value;
+  try{
+    const {data,error} = await db.rpc("check_pin", {p_pin:p});
+    if(error) throw error;
+    pinWrap.classList.remove("checking");
+    if(data===true){
+      pinWrap.classList.add("ok"); await pinSleep(300);
+      PIN=p; lsSet("gallery-pin", p); $("gate").hidden=true; $("gate-err").textContent="";
+      pinIn.value=""; paintDots(); pinWrap.classList.remove("ok");
+      refresh();
+    } else {
+      pinWrap.classList.add("bad"); $("gate-err").textContent = "That PIN is not right. Try again.";
+      if(navigator.vibrate) navigator.vibrate(120);
+      await pinSleep(500);
+      pinIn.value=""; paintDots(); pinWrap.classList.remove("bad"); pinIn.focus();
+    }
+  }catch(err){
+    $("gate-err").textContent = "Could not check the PIN. Check the internet and try again.";
+    pinIn.value=""; paintDots();
+  }finally{ pinChecking=false; pinWrap.classList.remove("checking"); }
+}
 document.querySelectorAll(".chipbtn").forEach(b=>b.addEventListener("click",()=>{ range=b.dataset.range; lsSet("dash-range",range); render(); }));
 $("export").addEventListener("click", exportExcel);
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", ()=>{ if(TAPS) render(); });
