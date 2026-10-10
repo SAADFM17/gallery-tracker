@@ -181,6 +181,7 @@ const store = {
   rows: db ? [] : lsGet("gallery-local", []),   // this month's taps
   queue: lsGet("gallery-queue", []),            // shared mode: taps not yet sent
   mine: lsGet("gallery-mine", []),              // ids this phone added, for undo
+  dayTotals: [],                                // days counted on the old Excel sheet (no timings)
   monthStart(){ const d=new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; },
   all(){
     const ids=new Set(this.rows.map(r=>r.id));
@@ -195,6 +196,11 @@ const store = {
       out = out.concat(data); if(data.length<1000) break; from+=1000;
     }
     this.rows = out.map(r=>({...r, ts:new Date(r.ts).getTime()}));
+    try{
+      const {data,error} = await db.rpc("get_day_totals", {p_pin:PIN});
+      if(error) throw error;
+      this.dayTotals = (data||[]).map(d=>{ const [y,m,dd]=d.day.split("-").map(Number); return {...d, ts:new Date(y,m-1,dd,12).getTime()}; });
+    }catch(e){ if(isBadPin(e)) throw e; }
   },
   add(tap){
     tap.id = uuid();
@@ -244,19 +250,21 @@ function setNet(ok, msg){
 
 function sameDay(ts){ return new Date(ts).toDateString()===new Date().toDateString(); }
 function sameMonth(ts){ const a=new Date(ts), b=new Date(); return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth(); }
-function totals(list, prefix){
+function totals(list, prefix, extra){
   const n=(k,s)=>list.filter(t=>t.kind===k && (!s||t.source===s)).length;
-  $(prefix+"-guests").textContent = n("arrival");
-  $(prefix+"-ch").textContent = n("arrival","amex");
-  $(prefix+"-wi").textContent = n("arrival","walkin");
-  $(prefix+"-int").textContent = n("interest");
+  const x=f=>(extra||[]).reduce((a,d)=>a+(d[f]||0),0);
+  const ch=n("arrival","amex")+x("amex"), wi=n("arrival","walkin")+x("walkin");
+  $(prefix+"-guests").textContent = ch+wi;
+  $(prefix+"-ch").textContent = ch;
+  $(prefix+"-wi").textContent = wi;
+  $(prefix+"-int").textContent = n("interest")+x("amex_interest")+x("walkin_interest");
 }
 function render(){
   const all = store.all();
   const today = all.filter(t=>sameDay(t.ts));
   const month = all.filter(t=>sameMonth(t.ts));
   ["arrival","interest"].forEach(k=>["walkin","amex"].forEach(src=>{ $("c-"+k+"-"+src).textContent = today.filter(t=>t.kind===k&&t.source===src).length; }));
-  totals(today,"d"); totals(month,"m");
+  totals(today,"d",store.dayTotals.filter(d=>sameDay(d.ts))); totals(month,"m",store.dayTotals.filter(d=>sameMonth(d.ts)));
   const now=new Date();
   $("m-label").textContent = now.toLocaleDateString(undefined,{month:"long"});
   $("today").textContent = now.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long"});
